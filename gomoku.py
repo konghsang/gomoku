@@ -103,12 +103,30 @@ def line_has_overline(board: list[list[int]], x: int, y: int, color: int) -> boo
     return False
 
 
-def count_black_four_targets(board: list[list[int]]) -> int:
-    """
-    统计棋盘上黑方长度为 4 的连通线段数量（至少一端开放）。
+def _point_on_segment(px: int, py: int, sx: int, sy: int, dx: int, dy: int, length: int) -> bool:
+    """检查 (px, py) 是否在以 (sx, sy) 为起点的长度为 length 的 (dx, dy) 方向线段上。"""
+    if dx != 0:
+        if (px - sx) % dx != 0:
+            return False
+        k = (px - sx) // dx
+    else:
+        k = (py - sy) // dy
 
-    通过遍历每个黑子并检查以它为起点的连续线段（跳过被前驱黑子覆盖的线段），
-    统计所有长度恰好为 4 且至少一端为空位的线段数量。用于四四禁手检测。
+    if dy != 0:
+        if (py - sy) % dy != 0:
+            return False
+        if dx != 0 and (py - sy) // dy != k:
+            return False
+
+    return 0 <= k < length
+
+
+def count_black_four_targets(board: list[list[int]], place_x: int, place_y: int) -> int:
+    """
+    统计棋盘上黑方长度为 4 且经过落子点的连通线段数量（至少一端开放）。
+
+    用于四四禁手检测：仅统计包含当前落子 (place_x, place_y) 的线段，
+    满足规则"该落子必须在每一个四中"。
     """
     targets = 0
 
@@ -133,6 +151,10 @@ def count_black_four_targets(board: list[list[int]]) -> int:
                 if length != 4:
                     continue
 
+                # 规则要求：落子必须在每一个四中
+                if not _point_on_segment(place_x, place_y, x, y, dx, dy, 4):
+                    continue
+
                 forward_open = inside(nx, ny) and board[ny][nx] == Stone.EMPTY
                 backward_open = inside(prev_x, prev_y) and board[prev_y][prev_x] == Stone.EMPTY
                 if forward_open or backward_open:
@@ -141,12 +163,12 @@ def count_black_four_targets(board: list[list[int]]) -> int:
     return targets
 
 
-def count_black_three_targets(board: list[list[int]]) -> int:
+def count_black_three_targets(board: list[list[int]], place_x: int, place_y: int) -> int:
     """
-    统计棋盘上黑方长度为 3 的连通线段数量（两端均开放）。
+    统计棋盘上黑方长度为 3 且经过落子点的连通线段数量（两端均开放）。
 
-    通过遍历每个黑子并检查以它为起点的连续线段（跳过被前驱黑子覆盖的线段），
-    统计所有长度恰好为 3 且两端均为空位的线段数量。用于三三禁手检测。
+    用于三三禁手检测：仅统计包含当前落子 (place_x, place_y) 的线段，
+    满足规则"该落子必须在每一个活三中"。
     """
     targets = 0
 
@@ -170,6 +192,10 @@ def count_black_three_targets(board: list[list[int]]) -> int:
                 if length != 3:
                     continue
 
+                # 规则要求：落子必须在每一个活三中
+                if not _point_on_segment(place_x, place_y, x, y, dx, dy, 3):
+                    continue
+
                 forward_open = inside(nx, ny) and board[ny][nx] == Stone.EMPTY
                 backward_open = inside(prev_x, prev_y) and board[prev_y][prev_x] == Stone.EMPTY
                 if not (forward_open and backward_open):
@@ -189,20 +215,20 @@ def check_black_move(board: list[list[int]], x: int, y: int) -> MoveCheckResult:
     """
     检查黑方落子是否合法（含禁手检测）。
 
-    检测顺序：长连接手 → 成五获胜 → 四四禁手 → 三三禁手。
-    长连优先级高于成五：若同时形成5连和6连（如十字交叉），判长连禁手。
+    检测顺序：成五获胜 → 长连接手 → 四四禁手 → 三三禁手。
+    规则规定：五连与任何禁手（包括长连、四四、三三）同时形成时，禁手失效，五连获胜。
     """
-    if line_has_overline(board, x, y, Stone.BLACK):
-        return MoveCheckResult(False, "黑方长连禁手。")
-
     if line_has_exact_five(board, x, y, Stone.BLACK):
         return MoveCheckResult(True, "黑方成五，黑方获胜。", True)
 
-    four_targets = count_black_four_targets(board)
+    if line_has_overline(board, x, y, Stone.BLACK):
+        return MoveCheckResult(False, "黑方长连禁手。")
+
+    four_targets = count_black_four_targets(board, x, y)
     if four_targets >= 2:
         return MoveCheckResult(False, "黑方四四禁手。")
 
-    three_targets = count_black_three_targets(board)
+    three_targets = count_black_three_targets(board, x, y)
     if three_targets >= 2:
         return MoveCheckResult(False, "黑方三三禁手。")
 
