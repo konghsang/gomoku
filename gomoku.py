@@ -258,6 +258,8 @@ class GomokuApp:
         self._last_message_time = time.monotonic()
         self._last_message_time_lock = threading.Lock()
         self._heartbeat_id = 0
+        self._network_dialog_open = False
+        self._network_dialog: tk.Toplevel | None = None
 
         self._build_ui()
         self._center_window()
@@ -625,9 +627,64 @@ class GomokuApp:
         self._send_net(f"MOVE|{self.session_id}|{x}|{y}|{color_str}")
 
     def _open_network_dialog(self) -> None:
+        if self._network_dialog_open:
+            # 窗口已打开：提升到最前、聚焦、抖动突出、播放系统提示音
+            if self._network_dialog is not None:
+                try:
+                    exists = self._network_dialog.winfo_exists()
+                except tk.TclError:
+                    exists = False
+                if exists:
+                    self._network_dialog.lift()
+                    self._network_dialog.focus_force()
+                    # 系统提示音效
+                    if winsound:
+                        winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+                    else:
+                        self.root.bell()
+                    # 抖动效果：快速左右位移
+                    def shake(count: int = 5) -> None:
+                        if count <= 0 or not self._network_dialog_open:
+                            return
+                        try:
+                            dx = 15 if count % 2 == 1 else -15
+                            x = self._network_dialog.winfo_x() + dx
+                            y = self._network_dialog.winfo_y()
+                            self._network_dialog.geometry(f"+{x}+{y}")
+                            self._network_dialog.after(50, lambda: shake(count - 1))
+                        except tk.TclError:
+                            pass
+                    shake()
+                    return
+                else:
+                    self._network_dialog_open = False
+                    self._network_dialog = None
+            else:
+                self._network_dialog_open = False
+
+        self._network_dialog_open = True
+
         dialog = tk.Toplevel(self.root)
         dialog.title("联机对战")
         dialog.resizable(False, False)
+        self._network_dialog = dialog
+
+        # 居中显示对话框
+        dialog.update_idletasks()
+        dw = dialog.winfo_width()
+        dh = dialog.winfo_height()
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        x = (sw - dw) // 2
+        y = (sh - dh) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+        def close_dialog() -> None:
+            self._network_dialog_open = False
+            self._network_dialog = None
+            dialog.destroy()
+
+        dialog.protocol("WM_DELETE_WINDOW", close_dialog)
 
         tk.Label(dialog, text="主机地址:", font=("Microsoft YaHei", 10)).grid(row=0, column=0, padx=10, pady=(12, 6), sticky="e")
         host_entry = tk.Entry(dialog, width=18, font=("Microsoft YaHei", 10))
@@ -645,7 +702,7 @@ class GomokuApp:
             except ValueError:
                 self._set_status("端口无效。")
                 return
-            dialog.destroy()
+            close_dialog()
             self._start_host(port)
 
         def start_client() -> None:
@@ -655,7 +712,7 @@ class GomokuApp:
                 self._set_status("端口无效。")
                 return
             host = host_entry.get().strip() or "127.0.0.1"
-            dialog.destroy()
+            close_dialog()
             self._start_client(host, port)
 
         tk.Button(dialog, text="作为主机", command=start_host, font=("Microsoft YaHei", 10)).grid(row=2, column=0, padx=10, pady=12)
