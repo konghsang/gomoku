@@ -757,8 +757,7 @@ class GomokuApp:
 
         # 保存当前颜色再落子，避免 _apply_move 切换 current_player 后网络发包用错颜色
         current_color = self.current_player
-        if self._apply_move(x, y, current_color):
-            self._send_move_if_needed(x, y, current_color)
+        self._apply_move(x, y, current_color)
 
     def _draw_grid(self) -> None:
         self.canvas.delete("grid")
@@ -825,14 +824,19 @@ class GomokuApp:
             self._set_status(final_message)
             self._redraw()  # 先绘制棋子
             self.canvas.update()  # 强制刷新画布，确保棋子可见
-            # 【关键修改】：先更新战绩和状态，再弹窗
+
+            # 1. 立即同步落子动作到远端
+            if not is_remote:
+                self._send_move_if_needed(x, y, color)
+
+            # 2. 更新战绩与换边状态
             winner_color = Stone.WHITE if color == Stone.BLACK else Stone.BLACK
             self._update_stats(winner_color)
             self._handle_remote_game_end()
             self._update_cursor()
-            # 无论本地还是远程落子，都直接调用弹窗
-            self._show_result_dialog(final_message)
-            self._send_result_if_needed(Stone.BLACK if winner == "黑方" else Stone.WHITE, final_message)
+
+            # 3. 异步弹窗，防止阻塞主线程与发包流程
+            self.root.after(100, lambda: self._show_result_dialog(final_message))
             return False
 
         self.last_move = (x, y)
@@ -843,26 +847,28 @@ class GomokuApp:
         if result.win:
             self.game_over = True
             self._set_status(result.message)
-            # 【关键修改】：先更新战绩和状态，再弹窗
+
+            # 1. 立即同步落子动作到远端
+            if not is_remote:
+                self._send_move_if_needed(x, y, color)
+
+            # 2. 更新战绩与换边状态
             self._update_stats(color)
             self._handle_remote_game_end()
             self._update_cursor()
-            # 无论本地还是远程落子，都直接调用弹窗
-            self._show_result_dialog(result.message)
-            self._send_result_if_needed(color, result.message)
+
+            # 3. 异步弹窗，防止阻塞
+            self.root.after(100, lambda: self._show_result_dialog(result.message))
             return True
+
+        # 普通落子也在此刻发送
+        if not is_remote:
+            self._send_move_if_needed(x, y, color)
 
         self.current_player = Stone.WHITE if color == Stone.BLACK else Stone.BLACK
         next_side = "黑方" if self.current_player == Stone.BLACK else "白方"
         self._set_status(f"轮到{next_side}。")
         return True
-
-    def _send_result_if_needed(self, winner_color: int, message: str) -> None:
-        if self.mode != "remote" or not self.networked:
-            return
-        winner = "BLACK" if winner_color == Stone.BLACK else "WHITE"
-        safe_message = message.replace("\n", " ")
-        self._send_net(f"RESULT|{self.session_id}|{winner}|{safe_message}")
 
     def _handle_remote_game_end(self) -> None:
         if self.mode != "remote" or not self.networked:
