@@ -104,7 +104,19 @@ def line_has_overline(board: list[list[int]], x: int, y: int, color: int) -> boo
 
 
 def _point_on_segment(px: int, py: int, sx: int, sy: int, dx: int, dy: int, length: int) -> bool:
-    """检查 (px, py) 是否在以 (sx, sy) 为起点的长度为 length 的 (dx, dy) 方向线段上。"""
+    """检查 (px, py) 是否在以 (sx, sy) 为起点的长度为 length 的 (dx, dy) 方向线段上。
+
+    对于水平线段 (dy==0)，只沿 x 方向延伸，所以 py 必须等于 sy。
+    对于垂直线段 (dx==0)，只沿 y 方向延伸，所以 px 必须等于 sx。
+    否则一个不同行/列的落子点会被错误判定为在线段上。
+    """
+    # 水平线段：y 坐标必须固定不变
+    if dy == 0 and py != sy:
+        return False
+    # 垂直线段：x 坐标必须固定不变
+    if dx == 0 and px != sx:
+        return False
+
     if dx != 0:
         if (px - sx) % dx != 0:
             return False
