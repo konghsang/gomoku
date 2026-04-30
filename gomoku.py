@@ -482,6 +482,7 @@ class GomokuApp:
         self._network_dialog: tk.Toplevel | None = None
         self.role_swapped_session = -1
         self.waiting_rematch_reply = False
+        self._dialog_open = False
 
         self.my_wins = 0
         self.peer_wins = 0
@@ -633,14 +634,17 @@ class GomokuApp:
         messagebox.showinfo("开始对局", "黑方先手。黑方禁手：三三、四四、长连。")
 
     def _show_result_dialog(self, message: str) -> None:
+        self._dialog_open = True
         if self.mode == "remote" and self.networked:
             want_rematch = messagebox.askyesno("对局结束", f"{message}\n\n是否邀请对方开启下一局？")
+            self._dialog_open = False
             if want_rematch:
                 self._send_rematch_request()
             else:
                 self._set_status("已取消下一局，等待对方邀请或自行重新开始。")
         else:
             messagebox.showinfo("对局结束", message)
+            self._dialog_open = False
 
     def _play_move_sound(self) -> None:
         try:
@@ -746,9 +750,9 @@ class GomokuApp:
         if all(self.board[y][x] != Stone.EMPTY for y in range(BOARD_SIZE) for x in range(BOARD_SIZE)):
             self.game_over = True
             self._set_status("棋盘已满，平局。")
-            self._show_result_dialog("棋盘已满，平局！")
             self._update_cursor()
             self._update_stats(None)
+            self._show_result_dialog("棋盘已满，平局！")
             return
 
         # 保存当前颜色再落子，避免 _apply_move 切换 current_player 后网络发包用错颜色
@@ -821,14 +825,14 @@ class GomokuApp:
             self._set_status(final_message)
             self._redraw()  # 先绘制棋子
             self.canvas.update()  # 强制刷新画布，确保棋子可见
-            # 远程落子时，发送端已经发送了 RESULT 和弹窗，接收端不再重复
-            if not is_remote:
-                self._show_result_dialog(final_message)
-                self._send_result_if_needed(Stone.BLACK if winner == "黑方" else Stone.WHITE, final_message)
+            # 【关键修改】：先更新战绩和状态，再弹窗
             winner_color = Stone.WHITE if color == Stone.BLACK else Stone.BLACK
             self._update_stats(winner_color)
             self._handle_remote_game_end()
             self._update_cursor()
+            # 无论本地还是远程落子，都直接调用弹窗
+            self._show_result_dialog(final_message)
+            self._send_result_if_needed(Stone.BLACK if winner == "黑方" else Stone.WHITE, final_message)
             return False
 
         self.last_move = (x, y)
@@ -839,13 +843,13 @@ class GomokuApp:
         if result.win:
             self.game_over = True
             self._set_status(result.message)
-            # 远程落子时，发送端已经发送了 RESULT 和弹窗，接收端不再重复
-            if not is_remote:
-                self._show_result_dialog(result.message)
-                self._send_result_if_needed(color, result.message)
+            # 【关键修改】：先更新战绩和状态，再弹窗
             self._update_stats(color)
             self._handle_remote_game_end()
             self._update_cursor()
+            # 无论本地还是远程落子，都直接调用弹窗
+            self._show_result_dialog(result.message)
+            self._send_result_if_needed(color, result.message)
             return True
 
         self.current_player = Stone.WHITE if color == Stone.BLACK else Stone.BLACK
@@ -1173,6 +1177,10 @@ class GomokuApp:
             self._set_status("发送失败，连接已断开。")
 
     def _process_network_queue(self) -> None:
+        if getattr(self, "_dialog_open", False):
+            self.root.after(100, self._process_network_queue)
+            return
+
         while True:
             try:
                 kind, payload = self.net_queue.get_nowait()
@@ -1266,8 +1274,10 @@ class GomokuApp:
                     return
 
                 # 弹窗询问我方是否同意
+                self._dialog_open = True
                 msg = "对方请求重新开始对局（或开启下一局），是否同意？\n若同意，当前对局（若未结束）将作废。"
                 agree = messagebox.askyesno("对局请求", msg)
+                self._dialog_open = False
 
                 if agree:
                     self._send_net(f"REMATCH_ACK|{self.session_id}|ACCEPT")
@@ -1291,22 +1301,7 @@ class GomokuApp:
             return
 
         if message.startswith("RESULT|"):
-            parts = message.split("|", 3)
-            if len(parts) == 4:
-                try:
-                    incoming_session = int(parts[1])
-                except ValueError:
-                    incoming_session = self.session_id
-                if incoming_session != self.session_id:
-                    return
-                winner = parts[2]
-                result_message = parts[3]
-                self.game_over = True
-                self._set_status(result_message)
-                self._show_result_dialog(result_message)
-                self._update_cursor()
-                if self.is_host:
-                    self._handle_remote_game_end()
+            # 已由本地 _apply_move 同步处理胜负弹窗，直接忽略该报文
             return
 
         if message.startswith("NEXTBLACK|"):
