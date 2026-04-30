@@ -1,72 +1,160 @@
 
-这是一个为你准备的、可以直接交给 Cline 读取的 **完整版 Markdown 任务书** 。
+这是一个非常精准的测试反馈！第二局出现异常的原因在于 **联机状态下的“对局结算时序”与“黑白轮换”逻辑产生了冲突** ，导致第二局双方的颜色状态没有正确同步。
 
-这份文档将你之前的“逻辑规范自查”和刚刚发现的“联机 Bug 修复与网络优化”结合在了一起。你只需要将以下内容保存为 `Cline_Gomoku_Task.md`，然后让 Cline 读取并执行即可。
+我为你准备了一份新的 `Code_Review_Report_V2.md`，专门针对这个“第二局异常（双重触发导致的黑白不轮换）” Bug 进行修复，并加入了你要求的“对局次数、当前执黑执白、胜负记录”等 UI 显示功能。
+
+你可以直接将以下内容保存为 `Code_Review_Report_V2.md`，然后交给 Cline 去执行：
 
 ---
 
-### 请将以下内容保存并提供给 Cline：
+### 请将以下内容保存为 `Code_Review_Report_V2.md` 提供给 Cline：
 
 **Markdown**
 
 ```
-# 五子棋项目 (Gomoku) 全量代码审查与 Bug 修复任务书
+# 五子棋项目 - 第二局联机异常修复与战绩 UI 升级任务书
 
-你好，Cline。本任务书包含了当前五子棋项目（`gomoku.py` 等文件）的核心修复指令与逻辑自查规范。请仔细阅读以下要求，直接对工作区中的代码进行修改，并在完成后提供修改总结。
+你好，Cline。经过进一步的联机测试，我们发现第一局对局正常，但在第一局结束后进入第二局时，游戏状态出现了异常（执黑执白没有正确轮换或两端状态脱节）。
+同时，为了避免后续对局中玩家产生混乱，我们需要在 UI 上加入清晰的战绩面板和执子提醒。
 
-## 优先级 1：修复核心 Bug（联机落子颜色反转与卡死）
+请读取以下分析，并对 `gomoku.py` 进行修改。
 
-### 问题描述
-在远程联机模式下，当执黑方的玩家落子后，对面的客户端在相同位置显示的是白子，随后游戏流程卡死。
+## 一、 核心 Bug 修复：第二局换边异常
 
-### 根本原因
-在 `gomoku.py` 的 `_on_click` 方法中，代码先调用了 `self._apply_move(x, y, self.current_player)`。在 `_apply_move` 内部，成功落子后执行了状态切换：`self.current_player = Stone.WHITE if color == Stone.BLACK else Stone.BLACK`。
-随后 `_on_click` 调用 `self._send_move_if_needed(x, y)`。但此时 `self.current_player` 已经变成了下一个玩家的颜色！因此，`_send_move_if_needed` 内部使用 `self.current_player` 推断颜色时发出了错误的报文，导致两端状态机脱节（Desync）并卡死。
+### 1. Root Cause 分析
+在游戏结束时，主机会调用 `self._handle_remote_game_end()` 来翻转 `self.remote_black_is_host`，并向客户端发送 `NEXTBLACK` 以交换黑白方。
+**Bug 在于这个方法被错误地触发了两次**：
+当客户端获胜时，客户端会发送 `RESULT` 报文，同时也会发送 `MOVE` 报文。主机收到 `MOVE` 后在本地执行 `_apply_move`，判定游戏结束，调用了一次 `_handle_remote_game_end()`；紧接着主机处理网络队列里的 `RESULT` 报文，又调用了一次 `_handle_remote_game_end()`[cite: 1, 2]！
+连续翻转两次等于没有翻转，导致第二局双方对“谁是黑方”的认知发生错乱。
 
-### 修复指令
-请对 `gomoku.py` 进行以下修改：
-1. **修改 `_send_move_if_needed` 的签名与逻辑**：
-   将其改为接收当前落子的颜色参数：`def _send_move_if_needed(self, x: int, y: int, color: int) -> None:`。
-   内部逻辑改为：`color_str = "BLACK" if color == Stone.BLACK else "WHITE"`。
-2. **修改 `_on_click` 中的调用方式**：
-   在调用 `_apply_move` 之前，先将当前颜色保存到局部变量中，然后再传递给网络发送函数。
-   ```python
-   # 预期修改模式：
-   current_color = self.current_player
-   if self._apply_move(x, y, current_color):
-       self._send_move_if_needed(x, y, current_color)
+### 2. 修复指令
+通过引入 `session_id` 的幂等校验来防止一局内多次翻转[cite: 1, 2]。
+请在 `GomokuApp.__init__` 中新增：
+```python
+self.role_swapped_session = -1
+```
+
+修改 `_handle_remote_game_end` 方法：
+
+**Python**
+
+```
+def _handle_remote_game_end(self) -> None:
+    if self.mode != "remote" or not self.networked:
+        return
+    if not self.is_host:
+        return
+
+    # 新增：防止同一局内因收到 MOVE 和 RESULT 导致多次触发翻转
+    if getattr(self, 'role_swapped_session', -1) == self.session_id:
+        return
+    self.role_swapped_session = self.session_id
+
+    self.remote_black_is_host = not self.remote_black_is_host
+    owner = "HOST" if self.remote_black_is_host else "CLIENT"
+    self._send_net(f"NEXTBLACK|{self.session_id}|{owner}")
 ```
 
 ---
 
-## 优先级 2：网络模块健壮性优化
+## 二、 新增功能：战绩统计与当前身份提醒 UI
 
-请在修改 Bug 的同时，对 `gomoku.py` 的网络模块进行以下两项加固^^：
+为了避免联机时的身份混淆，我们需要在右侧面板新增一个战绩显示区域。
 
-1. **防止 TCP 粘包导致的 OOM** ：
-   在 `_start_receiver_thread` 方法中，`buffer += data.decode("utf-8")` 之后，加入长度限制机制（例如 `if len(buffer) > 10240: buffer = ""` 并在内部触发 `DISCONNECTED` 队列消息），防止极端情况或恶意数据导致内存溢出^^。
-2. **游戏中断线弹窗提示** ：
-   在 `_process_network_queue` 方法处理 `DISCONNECTED` 事件时，除了更新状态栏 `_set_status` 外，如果游戏仍在进行中，请使用 `messagebox.showwarning` 或 `messagebox.showinfo` 弹窗明确告知玩家“连接已断开”^^。注意不要阻塞主事件循环。
+### 1. 初始化变量
+
+请在 `GomokuApp.__init__` 中新增统计相关的变量：
+
+**Python**
+
+```
+self.my_wins = 0
+self.peer_wins = 0
+self.draws = 0
+self.stats_updated_session = -1
+```
+
+### 2. 新增 UI 组件
+
+在 `_build_ui` 方法中，在 `self.status_var` 所在的 `tk.Label` 下方，新增一个用于显示战绩的 Label：
+
+**Python**
+
+```
+self.stats_var = tk.StringVar(value="")
+tk.Label(
+    side,
+    textvariable=self.stats_var,
+    justify=tk.LEFT,
+    bg="#f5f0e6",
+    fg="#1d4e89",  # 使用醒目的颜色
+    font=("Microsoft YaHei", 10, "bold"),
+    wraplength=200,
+).pack(padx=18, pady=(0, 14), anchor="w")
+```
+
+### 3. 新增战绩更新与 UI 刷新方法
+
+在 `GomokuApp` 类中新增以下两个方法：
+
+**Python**
+
+```
+def _refresh_stats_ui(self) -> None:
+    if self.mode != "remote" or not self.networked:
+        self.stats_var.set("")
+        return
+  
+    color_str = "黑方 (先手)" if self.my_color == Stone.BLACK else "白方 (后手)"
+    stats_text = (
+        f"【联机 - 第 {self.session_id + 1} 局】\n"
+        f"我方执：{color_str}\n"
+        f"战绩：{self.my_wins}胜 {self.peer_wins}负 {self.draws}平"
+    )
+    self.stats_var.set(stats_text)
+
+def _update_stats(self, winner_color: int | None) -> None:
+    if self.mode != "remote" or not self.networked:
+        return
+  
+    # 防止一局内多次计分
+    if getattr(self, 'stats_updated_session', -1) == self.session_id:
+        return
+    self.stats_updated_session = self.session_id
+
+    if winner_color is None:
+        self.draws += 1
+    elif winner_color == self.my_color:
+        self.my_wins += 1
+    else:
+        self.peer_wins += 1
+      
+    self._refresh_stats_ui()
+```
+
+### 4. 接入现有的游戏流程
+
+请将战绩刷新逻辑嵌入到现有的状态转换中：
+
+* **颜色分配时** ：在 `_assign_remote_colors` 方法的最后一行，调用 `self._refresh_stats_ui()` 以立即显示当前黑白方[cite: 1, 2]。
+* **重新开始时** ：在 `_reset_game` 方法的末尾，调用 `self._refresh_stats_ui()` 更新局数显示[cite: 1, 2]。
+* **平局时** ：在 `_on_click` 触发平局的地方 (`if all(self.board...)`)，调用 `self._update_stats(None)`[cite: 1, 2]。
+* **游戏分出胜负时** ：在 `_apply_move` 方法内部：
+* 当触发禁手判负时 (`if not result.legal:`)，推断出 `winner_color = Stone.WHITE if color == Stone.BLACK else Stone.BLACK`，调用 `self._update_stats(winner_color)`[cite: 1, 2]。
+* 当成五获胜时 (`if result.win:`)，调用 `self._update_stats(color)`[cite: 1, 2]。
 
 ---
 
-## 优先级 3：禁手与胜负逻辑静态审查（Renju 规则）
+## 总结任务
 
-在修复完上述问题后，请基于以下规则对 `gomoku.py` 中的判定逻辑（如 `check_black_move` 等）进行一次静态代码审查^^，确保没有遗漏的边缘情况：
+Cline，请按照本说明书，先修复 `_handle_remote_game_end` 中的幂等 Bug（防止由于多报文到达引发的两次换边错乱），然后依次添加 `__init__`、`_build_ui` 及新的统计更新方法，并将它们挂载到生命周期函数中。完成后请简要总结你的改动。
 
-1. **基础胜负（五连）** ：任意方向恰好 5 个同色棋子即获胜[cite: 1]。
-2. **白方特权** ：白方无禁手，连成 5 子或 ≥6 子（长连）均获胜[cite: 1]。
-3. **黑方长连禁手 (Overline)** ：黑方形成连续的 6 个或以上黑子，判负[cite: 1]。
-4. **黑方四四禁手 (Four-Four)** ：黑方一子落下，同时形成两个或以上的“四”（包含活四和冲四）。**注意：** 落子点必须在每一个“四”中[cite: 1]。
-5. **黑方三三禁手 (Three-Three)** ：黑方一子落下，同时形成两个或以上的“活三”。**注意：** 活三必须保证两端紧邻位为空，且至少一端再往外一格也为空（具备形成活四的潜力）[cite: 1]。
-6. **五绝对优先原则** ：如果黑方落子同时形成“五连”和“禁手”（例如五连+长连，或五连+四四），则 **禁手失效** ，直接判黑方五连获胜[cite: 1]。
+```
 
----
+***
 
-## 给 Cline 的执行清单
+### 沟通建议
 
-* [ ] 步骤 1：修复 `_on_click` 和 `_send_move_if_needed` 的时序 Bug，解决联机颜色反转问题[cite: 1]。
-* [ ] 步骤 2：在接收线程中加入 `buffer` 长度限制，防止 OOM[cite: 1]。
-* [ ] 步骤 3：在断线处理逻辑中加入 UI 弹窗提示[cite: 1]。
-* [ ] 步骤 4：通读 `check_black_move` 及相关辅助函数，核对是否完全符合上述禁手规则。如果有隐患，请一并修复[cite: 1]。
-* [ ] 步骤 5：完成所有修改后，向用户输出一份简明的修改总结报告。
+把上面的 `Code_Review_Report_V2.md` 发给 Cline，并这样说：
+> *"Cline，我测试了联机功能，第一局很好，但在第二局身份轮换的时候彻底乱套了。请读取 `Code_Review_Report_V2.md`，修复主机收到 `MOVE` 和 `RESULT` 导致的双重翻转 Bug。顺便帮我把里面提到的战绩 UI、局数统计和黑白方提示一起做进去，这样以后下棋就非常清晰了。"*
+```

@@ -480,6 +480,12 @@ class GomokuApp:
         self._heartbeat_id = 0
         self._network_dialog_open = False
         self._network_dialog: tk.Toplevel | None = None
+        self.role_swapped_session = -1
+
+        self.my_wins = 0
+        self.peer_wins = 0
+        self.draws = 0
+        self.stats_updated_session = -1
 
         self._build_ui()
         self._center_window()
@@ -536,6 +542,17 @@ class GomokuApp:
             wraplength=200,
         ).pack(padx=18, pady=(0, 14), anchor="w")
 
+        self.stats_var = tk.StringVar(value="")
+        tk.Label(
+            side,
+            textvariable=self.stats_var,
+            justify=tk.LEFT,
+            bg="#f5f0e6",
+            fg="#1d4e89",
+            font=("Microsoft YaHei", 10, "bold"),
+            wraplength=200,
+        ).pack(padx=18, pady=(0, 14), anchor="w")
+
         tk.Button(side, text="本地双人", command=self._enter_local_mode, relief=tk.RAISED, bd=2, font=("Microsoft YaHei", 11)).pack(
             padx=18, pady=(10, 8), fill=tk.X
         )
@@ -575,6 +592,7 @@ class GomokuApp:
         self._update_cursor()
         self._redraw()
         self._set_status("黑方先手。黑方禁手：三三、四四、长连。")
+        self._refresh_stats_ui()
         if show_dialog:
             self._show_start_dialog()
 
@@ -711,6 +729,7 @@ class GomokuApp:
             self._set_status("棋盘已满，平局。")
             self._show_result_dialog("棋盘已满，平局！")
             self._update_cursor()
+            self._update_stats(None)
             return
 
         # 保存当前颜色再落子，避免 _apply_move 切换 current_player 后网络发包用错颜色
@@ -787,6 +806,8 @@ class GomokuApp:
             if not is_remote:
                 self._show_result_dialog(final_message)
                 self._send_result_if_needed(Stone.BLACK if winner == "黑方" else Stone.WHITE, final_message)
+            winner_color = Stone.WHITE if color == Stone.BLACK else Stone.BLACK
+            self._update_stats(winner_color)
             self._handle_remote_game_end()
             self._update_cursor()
             return False
@@ -803,6 +824,7 @@ class GomokuApp:
             if not is_remote:
                 self._show_result_dialog(result.message)
                 self._send_result_if_needed(color, result.message)
+            self._update_stats(color)
             self._handle_remote_game_end()
             self._update_cursor()
             return True
@@ -825,9 +847,45 @@ class GomokuApp:
         if not self.is_host:
             return
 
+        # 防止同一局内因收到 MOVE 和 RESULT 导致多次触发翻转
+        if getattr(self, 'role_swapped_session', -1) == self.session_id:
+            return
+        self.role_swapped_session = self.session_id
+
         self.remote_black_is_host = not self.remote_black_is_host
         owner = "HOST" if self.remote_black_is_host else "CLIENT"
         self._send_net(f"NEXTBLACK|{self.session_id}|{owner}")
+
+    def _refresh_stats_ui(self) -> None:
+        if self.mode != "remote" or not self.networked:
+            self.stats_var.set("")
+            return
+
+        color_str = "黑方 (先手)" if self.my_color == Stone.BLACK else "白方 (后手)"
+        stats_text = (
+            f"【联机 - 第 {self.session_id + 1} 局】\n"
+            f"我方执：{color_str}\n"
+            f"战绩：{self.my_wins}胜 {self.peer_wins}负 {self.draws}平"
+        )
+        self.stats_var.set(stats_text)
+
+    def _update_stats(self, winner_color: int | None) -> None:
+        if self.mode != "remote" or not self.networked:
+            return
+
+        # 防止一局内多次计分
+        if getattr(self, 'stats_updated_session', -1) == self.session_id:
+            return
+        self.stats_updated_session = self.session_id
+
+        if winner_color is None:
+            self.draws += 1
+        elif winner_color == self.my_color:
+            self.my_wins += 1
+        else:
+            self.peer_wins += 1
+
+        self._refresh_stats_ui()
 
     def _record_move(self, x: int, y: int, color: int, legal: bool) -> None:
         self.move_records.append(
@@ -1254,6 +1312,7 @@ class GomokuApp:
 
         black_owner = "主机" if self.remote_black_is_host else "加入者"
         self._set_status(f"联机成功，本局黑方：{black_owner}。")
+        self._refresh_stats_ui()
 
     def _send_hello(self) -> None:
         role = "HOST" if self.is_host else "CLIENT"
