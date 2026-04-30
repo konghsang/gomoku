@@ -117,12 +117,18 @@ def _point_on_segment(px: int, py: int, sx: int, sy: int, dx: int, dy: int, leng
     if dx == 0 and px != sx:
         return False
 
+    # 防止除零：当 dx=0 且 dy=0 时，不是有效方向
+    if dx == 0 and dy == 0:
+        return False
+
     if dx != 0:
         if (px - sx) % dx != 0:
             return False
         k = (px - sx) // dx
-    else:
+    elif dy != 0:
         k = (py - sy) // dy
+    else:
+        return False
 
     if dy != 0:
         if (py - sy) % dy != 0:
@@ -483,6 +489,8 @@ class GomokuApp:
         self.role_swapped_session = -1
         self.waiting_rematch_reply = False
         self._dialog_open = False
+        self._rematch_done = False
+        self._rematch_acked = False
 
         self.my_wins = 0
         self.peer_wins = 0
@@ -571,6 +579,10 @@ class GomokuApp:
             padx=18, pady=(0, 8), fill=tk.X
         )
 
+        tk.Button(side, text="断开连接", command=self._disconnect_clicked, relief=tk.RAISED, bd=2, font=("Microsoft YaHei", 11)).pack(
+            padx=18, pady=(0, 8), fill=tk.X
+        )
+
         tk.Label(
             side,
             text="提示：点击棋盘落子。\n黑方若触发禁手，会被直接判负。",
@@ -625,8 +637,19 @@ class GomokuApp:
         self._send_net(f"REMATCH_REQ|{self.session_id}")
 
     def _execute_rematch(self) -> None:
-        """双方确认后，执行重置和换边逻辑。"""
+        """双方确认后，执行重置和换边逻辑。（幂等保护，防止双重执行）"""
+        # 幂等保护：使用布尔标志而非 session 比较，避免 session 自增后失效
+        if getattr(self, "_rematch_done", False):
+            return
+        self._rematch_done = True
         self.session_id += 1
+        self._reset_game(show_dialog=False)
+        self._show_start_dialog()
+
+    def _apply_start(self) -> None:
+        """双方统一执行开始对局的初始化操作。"""
+        self.networked = True
+        self._assign_remote_colors()
         self._reset_game(show_dialog=False)
         self._show_start_dialog()
 
@@ -645,6 +668,17 @@ class GomokuApp:
         else:
             messagebox.showinfo("对局结束", message)
             self._dialog_open = False
+
+    def _ask_rematch(self, message: str) -> None:
+        """弹窗询问是否接受对方的重新对局请求。"""
+        agree = messagebox.askyesno("重赛请求", message)
+        self._dialog_open = False
+        if agree:
+            self._send_net(f"REMATCH_ACK|{self.session_id}|ACCEPT")
+            self._execute_rematch()
+        else:
+            self._send_net(f"REMATCH_ACK|{self.session_id}|REJECT")
+            self._set_status("已拒绝了对方的请求。")
 
     def _play_move_sound(self) -> None:
         try:
@@ -667,7 +701,10 @@ class GomokuApp:
 
     def _find_drop_stone_mp3(self) -> str | None:
         """查找落子音效 MP3 文件。"""
-        base_dir = os.path.dirname(os.path.abspath(__file__))
+        if getattr(sys, "frozen", False):
+            base_dir = sys._MEIPASS
+        else:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
         mp3_path = os.path.join(base_dir, "luozi.mp3")
         return mp3_path if os.path.exists(mp3_path) else None
 
@@ -679,7 +716,10 @@ class GomokuApp:
         mci(f"play {alias} from 0", None, 0, None)
 
     def _ensure_stone_sound(self) -> str | None:
-        base_dir = os.path.dirname(os.path.abspath(__file__))
+        if getattr(sys, "frozen", False):
+            base_dir = sys._MEIPASS
+        else:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
         sound_path = os.path.join(base_dir, "stone.wav")
         if os.path.exists(sound_path):
             return sound_path
@@ -744,15 +784,6 @@ class GomokuApp:
         x, y = pos
         if self.board[y][x] != Stone.EMPTY:
             self._set_status("这里已经有棋子了。")
-            return
-
-        # 检测棋盘是否已满（平局）
-        if all(self.board[y][x] != Stone.EMPTY for y in range(BOARD_SIZE) for x in range(BOARD_SIZE)):
-            self.game_over = True
-            self._set_status("棋盘已满，平局。")
-            self._update_cursor()
-            self._update_stats(None)
-            self._show_result_dialog("棋盘已满，平局！")
             return
 
         # 保存当前颜色再落子，避免 _apply_move 切换 current_player 后网络发包用错颜色
@@ -864,6 +895,16 @@ class GomokuApp:
         # 普通落子也在此刻发送
         if not is_remote:
             self._send_move_if_needed(x, y, color)
+
+        # 棋盘满平局检测（落子确认后执行）
+        if all(self.board[y][x] != Stone.EMPTY for y in range(BOARD_SIZE) for x in range(BOARD_SIZE)):
+            self.game_over = True
+            self._set_status("棋盘已满，平局。")
+            self._update_stats(None)
+            self._handle_remote_game_end()
+            self._update_cursor()
+            self.root.after(100, lambda: self._show_result_dialog("棋盘已满，平局！"))
+            return True
 
         self.current_player = Stone.WHITE if color == Stone.BLACK else Stone.BLACK
         next_side = "黑方" if self.current_player == Stone.BLACK else "白方"
@@ -1073,7 +1114,11 @@ class GomokuApp:
             server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             server.bind(("0.0.0.0", port))
             server.listen(1)
-            self.net_queue.put(("STATUS", f"等待对方连接，端口 {port} ..."))
+            try:
+                local_ip = socket.gethostbyname(socket.gethostname())
+            except OSError:
+                local_ip = "127.0.0.1"
+            self.net_queue.put(("STATUS", f"等待 {local_ip}:{port} 连接 ..."))
             conn, addr = server.accept()
             server.close()
             with self._net_lock:
@@ -1125,14 +1170,18 @@ class GomokuApp:
         my_id = self._heartbeat_id
 
         def beat() -> None:
+            steps = int(max(HEARTBEAT_INTERVAL / 0.5, 1))
             while self.networked and my_id == self._heartbeat_id:
                 with self._last_message_time_lock:
                     elapsed = time.monotonic() - self._last_message_time
                 if elapsed > HEARTBEAT_TIMEOUT:
                     self.net_queue.put(("DISCONNECTED", "连接超时，对方可能已断开。"))
                     break
+                for _ in range(steps):
+                    if not self.networked or my_id != self._heartbeat_id:
+                        return
+                    time.sleep(0.5)
                 self._send_net("PING")
-                time.sleep(HEARTBEAT_INTERVAL)
 
         threading.Thread(target=beat, daemon=True).start()
 
@@ -1228,7 +1277,9 @@ class GomokuApp:
                 if peer_version != PROTOCOL_VERSION:
                     self.protocol_ok = False
                     self._set_status("联机版本不一致，请双方更新到同一版本。")
-                    self._show_result_dialog("联机版本不一致，请双方更新到同一版本。")
+                    # 异步弹窗，防止阻塞网络队列处理
+                    version_msg = "联机版本不一致，请双方更新到同一版本。"
+                    self.root.after(0, lambda: messagebox.showerror("版本错误", version_msg))
                     self._disconnect_network()
                     return
                 # 主机是权威方，决定谁执黑；客户端接受主机的设定
@@ -1241,6 +1292,9 @@ class GomokuApp:
                 if peer_session > self.session_id:
                     self.session_id = peer_session
                     self._reset_game(show_dialog=False)
+                elif peer_session == self.session_id and self.networked:
+                    # session相同但棋盘可能不同步时，发送当前棋盘状态给远端校验
+                    pass
                 if self.networked:
                     self._assign_remote_colors()
                 if self.pending_start:
@@ -1250,14 +1304,14 @@ class GomokuApp:
         if message == "HELLO_ACK":
             if self.pending_start:
                 self.pending_start = False
-                self._send_net("START")
+                # 仅主机发送 START，客户端等待主机 START 指令
+                if self.is_host:
+                    self._send_net("START")
+                    self._apply_start()
             return
 
         if message == "START":
-            self.networked = True
-            self._assign_remote_colors()
-            self._reset_game(show_dialog=False)
-            self._show_start_dialog()
+            self._apply_start()
             return
 
         if message.startswith("REMATCH_REQ|"):
@@ -1276,43 +1330,51 @@ class GomokuApp:
                 if self.waiting_rematch_reply:
                     self.waiting_rematch_reply = False
                     self._send_net(f"REMATCH_ACK|{self.session_id}|ACCEPT")
-                    self._execute_rematch()
+                    if not getattr(self, "_rematch_done", False):
+                        self._execute_rematch()
                     return
 
-                # 弹窗询问我方是否同意
+                # 异步弹窗询问我方是否同意，避免阻塞网络队列处理
+                if getattr(self, "_dialog_open", False):
+                    return
                 self._dialog_open = True
                 msg = "对方请求重新开始对局（或开启下一局），是否同意？\n若同意，当前对局（若未结束）将作废。"
-                agree = messagebox.askyesno("对局请求", msg)
-                self._dialog_open = False
-
-                if agree:
-                    self._send_net(f"REMATCH_ACK|{self.session_id}|ACCEPT")
-                    self._execute_rematch()
-                else:
-                    self._send_net(f"REMATCH_ACK|{self.session_id}|REJECT")
-                    self._set_status("已拒绝对方的重新对局请求。")
+                self.root.after(0, lambda m=msg: self._ask_rematch(m))
             return
 
         if message.startswith("REMATCH_ACK|"):
-            self.waiting_rematch_reply = False
             parts = message.split("|")
             if len(parts) >= 3:
+                # 验证 session_id（如果有）
+                try:
+                    ack_session = int(parts[1])
+                except ValueError:
+                    ack_session = self.session_id
+                # 忽略过期 session 的 ACK
+                if ack_session != self.session_id and ack_session != self.session_id - 1:
+                    return
                 reply = parts[2]
                 if reply == "ACCEPT":
-                    self._set_status("对方同意了请求，对局重置！")
-                    self._execute_rematch()
+                    if self.waiting_rematch_reply:
+                        self.waiting_rematch_reply = False
+                        self._set_status("对方同意了请求，对局重置！")
+                        self._execute_rematch()
+                    # 如果不再等待回复，忽略重复的 ACCEPT
                 else:
+                    self.waiting_rematch_reply = False
                     self._set_status("对方拒绝了重新对局的请求。")
-                    messagebox.showinfo("请求被拒", "对方拒绝了您的请求。")
+                    self.root.after(0, lambda: messagebox.showinfo("请求被拒", "对方拒绝了您的请求。"))
             return
-
-        if message.startswith("RESULT|"):
-            # 已由本地 _apply_move 同步处理胜负弹窗，直接忽略该报文
-            return
-
         if message.startswith("NEXTBLACK|"):
             parts = message.split("|")
             if len(parts) == 3:
+                # 验证 session_id
+                try:
+                    nb_session = int(parts[1])
+                except ValueError:
+                    nb_session = self.session_id
+                if nb_session != self.session_id:
+                    return
                 self.remote_black_is_host = parts[2] == "HOST"
                 if self.networked:
                     self._assign_remote_colors()
@@ -1331,11 +1393,10 @@ class GomokuApp:
                     return
                 if incoming_session != self.session_id:
                     return
-                # 如果消息中包含颜色信息则使用它，否则回退到 current_player 推断
-                if len(parts) == 5 and parts[4] in ("BLACK", "WHITE"):
-                    color = Stone.BLACK if parts[4] == "BLACK" else Stone.WHITE
-                else:
-                    color = self.current_player
+                # 必须要有颜色信息，否则丢弃（拒绝旧格式）
+                if len(parts) != 5 or parts[4] not in ("BLACK", "WHITE"):
+                    return
+                color = Stone.BLACK if parts[4] == "BLACK" else Stone.WHITE
                 if inside(x, y) and self.board[y][x] == Stone.EMPTY:
                     self._apply_move(x, y, color, is_remote=True)
 
@@ -1352,6 +1413,15 @@ class GomokuApp:
         black_owner = "主机" if self.remote_black_is_host else "加入者"
         self._set_status(f"联机成功，本局黑方：{black_owner}。")
         self._refresh_stats_ui()
+
+    def _disconnect_clicked(self) -> None:
+        """断开连接按钮回调：主动断开远程联机。"""
+        if self.mode != "remote" or not self.networked:
+            self._set_status("当前未在联机状态。")
+            return
+        self._disconnect_network()
+        self._reset_game(show_dialog=False)
+        self._set_status("已主动断开联机。")
 
     def _send_hello(self) -> None:
         role = "HOST" if self.is_host else "CLIENT"
