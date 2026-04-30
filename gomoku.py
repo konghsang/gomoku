@@ -133,6 +133,180 @@ def _point_on_segment(px: int, py: int, sx: int, sy: int, dx: int, dy: int, leng
     return 0 <= k < length
 
 
+def _build_line_segment(board: list[list[int]], x: int, y: int, dx: int, dy: int):
+    """
+    沿 (dx, dy) 方向构建经过 (x, y) 的线段（包含已落子的黑子和空位）。
+    遇到白子或棋盘边界时停止。
+    返回 (values, positions)：
+    - values: 从近到远的单元格值列表（不含白子，不含越界），(x,y) 在中间
+    - positions: 对应 (nx, ny) 坐标列表
+    """
+    back_values = []
+    back_pos = []
+    nx, ny = x - dx, y - dy
+    while inside(nx, ny) and board[ny][nx] != Stone.WHITE:
+        back_values.append(board[ny][nx])
+        back_pos.append((nx, ny))
+        nx -= dx
+        ny -= dy
+
+    fwd_values = []
+    fwd_pos = []
+    nx, ny = x + dx, y + dy
+    while inside(nx, ny) and board[ny][nx] != Stone.WHITE:
+        fwd_values.append(board[ny][nx])
+        fwd_pos.append((nx, ny))
+        nx += dx
+        ny += dy
+
+    back_values.reverse()
+    back_pos.reverse()
+    values = back_values + [board[y][x]] + fwd_values
+    positions = back_pos + [(x, y)] + fwd_pos
+    return values, positions
+
+
+def _count_jump_live_three_in_direction(board: list[list[int]], x: int, y: int, dx: int, dy: int) -> int:
+    """
+    检测在 (dx, dy) 方向上，(x, y) 落子后是否形成跳活三。
+    
+    跳活三模式（标记 B=黑子, _=空位, P=落子点）：
+    模式1: _ B B _ B _   (落子点为第2个黑子)
+    模式2: _ B _ B B _   (落子点为第4个黑子)
+    
+    即：总共 3 个黑子，其中 1 个间隙，两端开放，
+    且至少一端向外还有至少 1 个空位（保证能形成活四）。
+    
+    返回值：0 或 1（每个方向最多 1 个跳活三模式）。
+    """
+    values, positions = _build_line_segment(board, x, y, dx, dy)
+    
+    # 在 positions 中找到 (x, y) 的索引
+    try:
+        move_idx = positions.index((x, y))
+    except ValueError:
+        return 0
+    
+    # 在 values 序列中滑动窗口检测跳活三模式
+    # 跳活三中 3 个黑子跨越 5 个格位（黑-黑-空-黑 或 黑-空-黑-黑）
+    # 两端还需各有一个空位，所以总窗口至少 7 格
+    for win_size in (5, 6, 7):
+        for start in range(0, len(values) - win_size + 1):
+            if not (start <= move_idx < start + win_size):
+                # 窗口必须包含落子点
+                continue
+            
+            window = values[start:start + win_size]
+            
+            # 统计黑子数量（必须恰好 3 个）
+            black_count = sum(1 for v in window if v == Stone.BLACK)
+            if black_count != 3:
+                continue
+            
+            # 找到 3 个黑子的索引
+            black_indices = [i for i, v in enumerate(window) if v == Stone.BLACK]
+            
+            # 检查 3 个黑子是否有 1 个间隙（非连续）
+            # 即跨度 = 最大索引 - 最小索引 + 1，减去 3 应等于 1
+            span = black_indices[-1] - black_indices[0] + 1
+            if span != 4:  # 3 黑 + 1 间隙 = 4 格
+                continue
+            
+            # 检查间隙两侧是否确实有黑子（确保不是末端空格）
+            # 间隙位置 = 没有黑子的那个索引
+            gap_cells = [i for i in range(black_indices[0], black_indices[-1] + 1) if i not in black_indices]
+            if len(gap_cells) != 1:
+                continue
+            
+            # 间隙必须是空位（不能是白子——但我们已经过滤了白子）
+            if window[gap_cells[0]] != Stone.EMPTY:
+                continue
+            
+            # 检查两端开放（两端紧邻位为空）
+            before_idx = black_indices[0] - 1
+            after_idx = black_indices[-1] + 1
+            
+            if before_idx < 0 or after_idx >= len(window):
+                # 窗口边界到了棋盘边界或白子，不是开放端
+                continue
+            
+            if window[before_idx] != Stone.EMPTY or window[after_idx] != Stone.EMPTY:
+                continue
+            
+            # 检查至少一端有 2+ 连续空位（活四潜力）
+            open2_before = (before_idx - 1 >= 0 and window[before_idx - 1] == Stone.EMPTY)
+            open2_after = (after_idx + 1 < len(window) and window[after_idx + 1] == Stone.EMPTY)
+            
+            if not open2_before and not open2_after:
+                continue
+            
+            # 找到有效的跳活三模式
+            return 1
+    
+    return 0
+
+
+def _count_jump_four_in_direction(board: list[list[int]], x: int, y: int, dx: int, dy: int) -> int:
+    """
+    检测在 (dx, dy) 方向上，(x, y) 落子后是否形成跳四。
+    
+    跳四模式：B B _ B B  （中间 1 个间隙，4 个黑子）
+    落子点可以是任意一个黑子位置。
+    
+    至少一端紧邻空位即为有效的"四"。
+    
+    返回值：0 或 1。
+    """
+    values, positions = _build_line_segment(board, x, y, dx, dy)
+    
+    try:
+        move_idx = positions.index((x, y))
+    except ValueError:
+        return 0
+    
+    # 跳四模式为：4 个黑子在 5 格范围内，中间有 1 个间隙
+    # 两端至少有一端紧邻空位
+    for win_size in (5, 6):
+        for start in range(0, len(values) - win_size + 1):
+            if not (start <= move_idx < start + win_size):
+                continue
+            
+            window = values[start:start + win_size]
+            
+            black_count = sum(1 for v in window if v == Stone.BLACK)
+            if black_count != 4:
+                continue
+            
+            black_indices = [i for i, v in enumerate(window) if v == Stone.BLACK]
+            
+            # 4 个黑子 + 1 个间隙 = 跨度 5
+            span = black_indices[-1] - black_indices[0] + 1
+            if span != 5:
+                continue
+            
+            # 间隙位置
+            gap_cells = [i for i in range(black_indices[0], black_indices[-1] + 1) if i not in black_indices]
+            if len(gap_cells) != 1:
+                continue
+            
+            if window[gap_cells[0]] != Stone.EMPTY:
+                continue
+            
+            # 至少一端紧邻空位（或超出窗口边界时，需检查是否是越界/白子）
+            before_idx = black_indices[0] - 1
+            after_idx = black_indices[-1] + 1
+            
+            open_forward = (after_idx < len(window) and window[after_idx] == Stone.EMPTY)
+            open_backward = (before_idx >= 0 and window[before_idx] == Stone.EMPTY)
+            
+            if not open_forward and not open_backward:
+                continue
+            
+            return 1
+    
+    return 0
+
+
 def count_black_four_targets(board: list[list[int]], place_x: int, place_y: int) -> int:
     """
     统计棋盘上黑方长度为 4 且经过落子点的连通线段数量（至少一端开放）。
@@ -171,6 +345,10 @@ def count_black_four_targets(board: list[list[int]], place_x: int, place_y: int)
                 backward_open = inside(prev_x, prev_y) and board[prev_y][prev_x] == Stone.EMPTY
                 if forward_open or backward_open:
                     targets += 1
+
+    # 加上跳四计数
+    for dx, dy in ((1, 0), (0, 1), (1, 1), (1, -1)):
+        targets += _count_jump_four_in_direction(board, place_x, place_y, dx, dy)
 
     return targets
 
@@ -219,6 +397,10 @@ def count_black_three_targets(board: list[list[int]], place_x: int, place_y: int
                 backward_open2 = inside(prev_x - dx, prev_y - dy) and board[prev_y - dy][prev_x - dx] == Stone.EMPTY
                 if forward_open2 or backward_open2:
                     targets += 1
+
+    # 加上跳活三计数
+    for dx, dy in ((1, 0), (0, 1), (1, 1), (1, -1)):
+        targets += _count_jump_live_three_in_direction(board, place_x, place_y, dx, dy)
 
     return targets
 
