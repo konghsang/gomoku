@@ -713,8 +713,10 @@ class GomokuApp:
             self._update_cursor()
             return
 
-        if self._apply_move(x, y, self.current_player):
-            self._send_move_if_needed(x, y)
+        # 保存当前颜色再落子，避免 _apply_move 切换 current_player 后网络发包用错颜色
+        current_color = self.current_player
+        if self._apply_move(x, y, current_color):
+            self._send_move_if_needed(x, y, current_color)
 
     def _draw_grid(self) -> None:
         self.canvas.delete("grid")
@@ -839,11 +841,11 @@ class GomokuApp:
             }
         )
 
-    def _send_move_if_needed(self, x: int, y: int) -> None:
+    def _send_move_if_needed(self, x: int, y: int, color: int) -> None:
         if not self.networked or self.net_socket is None:
             return
         # 在 MOVE 消息中包含颜色信息，避免接收方因状态不同步而推断错误
-        color_str = "BLACK" if self.current_player == Stone.BLACK else "WHITE"
+        color_str = "BLACK" if color == Stone.BLACK else "WHITE"
         self._send_net(f"MOVE|{self.session_id}|{x}|{y}|{color_str}")
 
     def _open_network_dialog(self) -> None:
@@ -1071,6 +1073,11 @@ class GomokuApp:
                 except UnicodeDecodeError:
                     # 忽略无法解码的字节序列
                     continue
+                # 防止 TCP 粘包导致 buffer 无限增长（OOM 防护）
+                if len(buffer) > 10240:
+                    buffer = ""
+                    self.net_queue.put(("DISCONNECTED", "接收数据异常，连接已断开。"))
+                    break
                 with self._last_message_time_lock:
                     self._last_message_time = time.monotonic()
                 while "\n" in buffer:
@@ -1102,8 +1109,12 @@ class GomokuApp:
                 self.networked = True
                 self._assign_remote_colors()
             elif kind == "DISCONNECTED":
+                was_playing = not self.game_over and self.mode == "remote"
                 self._disconnect_network()
                 self._set_status(str(payload))
+                # 游戏进行中断线时弹窗提示（不阻塞事件循环）
+                if was_playing:
+                    self.root.after(0, lambda: messagebox.showwarning("连接断开", str(payload)))
             elif kind == "NET":
                 self._handle_net_message(str(payload))
 
