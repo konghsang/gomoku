@@ -855,6 +855,7 @@ class GomokuApp:
         self.remote_black_is_host = not self.remote_black_is_host
         owner = "HOST" if self.remote_black_is_host else "CLIENT"
         self._send_net(f"NEXTBLACK|{self.session_id}|{owner}")
+        self._assign_remote_colors()
 
     def _refresh_stats_ui(self) -> None:
         if self.mode != "remote" or not self.networked:
@@ -1268,12 +1269,6 @@ class GomokuApp:
         if message.startswith("NEXTBLACK|"):
             parts = message.split("|")
             if len(parts) == 3:
-                try:
-                    incoming_session = int(parts[1])
-                except ValueError:
-                    incoming_session = self.session_id
-                if incoming_session != self.session_id:
-                    return
                 self.remote_black_is_host = parts[2] == "HOST"
                 if self.networked:
                     self._assign_remote_colors()
