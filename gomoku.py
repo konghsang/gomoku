@@ -169,24 +169,24 @@ def _build_line_segment(board: list[list[int]], x: int, y: int, dx: int, dy: int
 def _count_jump_live_three_in_direction(board: list[list[int]], x: int, y: int, dx: int, dy: int) -> int:
     """
     检测在 (dx, dy) 方向上，(x, y) 落子后是否形成跳活三。
-    
+
     跳活三模式（标记 B=黑子, _=空位, P=落子点）：
     模式1: _ B B _ B _   (落子点为第2个黑子)
     模式2: _ B _ B B _   (落子点为第4个黑子)
-    
+
     即：总共 3 个黑子，其中 1 个间隙，两端开放，
     且至少一端向外还有至少 1 个空位（保证能形成活四）。
-    
+
     返回值：0 或 1（每个方向最多 1 个跳活三模式）。
     """
     values, positions = _build_line_segment(board, x, y, dx, dy)
-    
+
     # 在 positions 中找到 (x, y) 的索引
     try:
         move_idx = positions.index((x, y))
     except ValueError:
         return 0
-    
+
     # 在 values 序列中滑动窗口检测跳活三模式
     # 跳活三中 3 个黑子跨越 5 个格位（黑-黑-空-黑 或 黑-空-黑-黑）
     # 两端还需各有一个空位，所以总窗口至少 7 格
@@ -195,115 +195,115 @@ def _count_jump_live_three_in_direction(board: list[list[int]], x: int, y: int, 
             if not (start <= move_idx < start + win_size):
                 # 窗口必须包含落子点
                 continue
-            
-            window = values[start:start + win_size]
-            
+
+            window = values[start : start + win_size]
+
             # 统计黑子数量（必须恰好 3 个）
             black_count = sum(1 for v in window if v == Stone.BLACK)
             if black_count != 3:
                 continue
-            
+
             # 找到 3 个黑子的索引
             black_indices = [i for i, v in enumerate(window) if v == Stone.BLACK]
-            
+
             # 检查 3 个黑子是否有 1 个间隙（非连续）
             # 即跨度 = 最大索引 - 最小索引 + 1，减去 3 应等于 1
             span = black_indices[-1] - black_indices[0] + 1
             if span != 4:  # 3 黑 + 1 间隙 = 4 格
                 continue
-            
+
             # 检查间隙两侧是否确实有黑子（确保不是末端空格）
             # 间隙位置 = 没有黑子的那个索引
             gap_cells = [i for i in range(black_indices[0], black_indices[-1] + 1) if i not in black_indices]
             if len(gap_cells) != 1:
                 continue
-            
+
             # 间隙必须是空位（不能是白子——但我们已经过滤了白子）
             if window[gap_cells[0]] != Stone.EMPTY:
                 continue
-            
+
             # 检查两端开放（两端紧邻位为空）
             before_idx = black_indices[0] - 1
             after_idx = black_indices[-1] + 1
-            
+
             if before_idx < 0 or after_idx >= len(window):
                 # 窗口边界到了棋盘边界或白子，不是开放端
                 continue
-            
+
             if window[before_idx] != Stone.EMPTY or window[after_idx] != Stone.EMPTY:
                 continue
-            
+
             # 检查至少一端有 2+ 连续空位（活四潜力）
-            open2_before = (before_idx - 1 >= 0 and window[before_idx - 1] == Stone.EMPTY)
-            open2_after = (after_idx + 1 < len(window) and window[after_idx + 1] == Stone.EMPTY)
-            
+            open2_before = before_idx - 1 >= 0 and window[before_idx - 1] == Stone.EMPTY
+            open2_after = after_idx + 1 < len(window) and window[after_idx + 1] == Stone.EMPTY
+
             if not open2_before and not open2_after:
                 continue
-            
+
             # 找到有效的跳活三模式
             return 1
-    
+
     return 0
 
 
 def _count_jump_four_in_direction(board: list[list[int]], x: int, y: int, dx: int, dy: int) -> int:
     """
     检测在 (dx, dy) 方向上，(x, y) 落子后是否形成跳四。
-    
+
     跳四模式：B B _ B B  （中间 1 个间隙，4 个黑子）
     落子点可以是任意一个黑子位置。
-    
+
     至少一端紧邻空位即为有效的"四"。
-    
+
     返回值：0 或 1。
     """
     values, positions = _build_line_segment(board, x, y, dx, dy)
-    
+
     try:
         move_idx = positions.index((x, y))
     except ValueError:
         return 0
-    
+
     # 跳四模式为：4 个黑子在 5 格范围内，中间有 1 个间隙
     # 两端至少有一端紧邻空位
     for win_size in (5, 6):
         for start in range(0, len(values) - win_size + 1):
             if not (start <= move_idx < start + win_size):
                 continue
-            
-            window = values[start:start + win_size]
-            
+
+            window = values[start : start + win_size]
+
             black_count = sum(1 for v in window if v == Stone.BLACK)
             if black_count != 4:
                 continue
-            
+
             black_indices = [i for i, v in enumerate(window) if v == Stone.BLACK]
-            
+
             # 4 个黑子 + 1 个间隙 = 跨度 5
             span = black_indices[-1] - black_indices[0] + 1
             if span != 5:
                 continue
-            
+
             # 间隙位置
             gap_cells = [i for i in range(black_indices[0], black_indices[-1] + 1) if i not in black_indices]
             if len(gap_cells) != 1:
                 continue
-            
+
             if window[gap_cells[0]] != Stone.EMPTY:
                 continue
-            
+
             # 至少一端紧邻空位（或超出窗口边界时，需检查是否是越界/白子）
             before_idx = black_indices[0] - 1
             after_idx = black_indices[-1] + 1
-            
-            open_forward = (after_idx < len(window) and window[after_idx] == Stone.EMPTY)
-            open_backward = (before_idx >= 0 and window[before_idx] == Stone.EMPTY)
-            
+
+            open_forward = after_idx < len(window) and window[after_idx] == Stone.EMPTY
+            open_backward = before_idx >= 0 and window[before_idx] == Stone.EMPTY
+
             if not open_forward and not open_backward:
                 continue
-            
+
             return 1
-    
+
     return 0
 
 
@@ -392,7 +392,7 @@ def count_black_three_targets(board: list[list[int]], place_x: int, place_y: int
                     continue
 
                 # 活三判定：两端紧邻位必须为空，且至少有一端再往外一格也为空
-                #（即该侧有连续两个空位，这样落子后才能形成活四）
+                # （即该侧有连续两个空位，这样落子后才能形成活四）
                 forward_open2 = inside(nx + dx, ny + dy) and board[ny + dy][nx + dx] == Stone.EMPTY
                 backward_open2 = inside(prev_x - dx, prev_y - dy) and board[prev_y - dy][prev_x - dx] == Stone.EMPTY
                 if forward_open2 or backward_open2:
@@ -444,11 +444,11 @@ class GomokuApp:
     def __init__(self) -> None:
         self.root = tk.Tk()
         self.root.title("五子棋 - 双人对战")
-        if getattr(sys, 'frozen', False):
+        if getattr(sys, "frozen", False):
             base_dir = sys._MEIPASS
         else:
             base_dir = os.path.dirname(os.path.abspath(__file__))
-        icon_path = os.path.join(base_dir, 'tu.ico')
+        icon_path = os.path.join(base_dir, "tu.ico")
         if os.path.exists(icon_path):
             self.root.iconbitmap(icon_path)
         self.root.resizable(False, False)
@@ -481,6 +481,7 @@ class GomokuApp:
         self._network_dialog_open = False
         self._network_dialog: tk.Toplevel | None = None
         self.role_swapped_session = -1
+        self.waiting_rematch_reply = False
 
         self.my_wins = 0
         self.peer_wins = 0
@@ -609,19 +610,37 @@ class GomokuApp:
             if now - self.last_reset_at < self.reset_cooldown:
                 return
             self.last_reset_at = now
-            self.session_id += 1
-            self._send_net(f"RESET|{self.session_id}")
-            self._reset_game(show_dialog=False)
-            self._show_start_dialog()
+            self._send_rematch_request()
             return
 
         self._reset_game()
+
+    def _send_rematch_request(self) -> None:
+        if self.waiting_rematch_reply:
+            self._set_status("已发送请求，请等待对方回复。")
+            return
+        self.waiting_rematch_reply = True
+        self._set_status("已发送重新对局请求，等待对方同意...")
+        self._send_net(f"REMATCH_REQ|{self.session_id}")
+
+    def _execute_rematch(self) -> None:
+        """双方确认后，执行重置和换边逻辑。"""
+        self.session_id += 1
+        self._reset_game(show_dialog=False)
+        self._show_start_dialog()
 
     def _show_start_dialog(self) -> None:
         messagebox.showinfo("开始对局", "黑方先手。黑方禁手：三三、四四、长连。")
 
     def _show_result_dialog(self, message: str) -> None:
-        messagebox.showinfo("对局结束", message)
+        if self.mode == "remote" and self.networked:
+            want_rematch = messagebox.askyesno("对局结束", f"{message}\n\n是否邀请对方开启下一局？")
+            if want_rematch:
+                self._send_rematch_request()
+            else:
+                self._set_status("已取消下一局，等待对方邀请或自行重新开始。")
+        else:
+            messagebox.showinfo("对局结束", message)
 
     def _play_move_sound(self) -> None:
         try:
@@ -848,7 +867,7 @@ class GomokuApp:
             return
 
         # 防止同一局内因收到 MOVE 和 RESULT 导致多次触发翻转
-        if getattr(self, 'role_swapped_session', -1) == self.session_id:
+        if getattr(self, "role_swapped_session", -1) == self.session_id:
             return
         self.role_swapped_session = self.session_id
 
@@ -863,11 +882,7 @@ class GomokuApp:
             return
 
         color_str = "黑方 (先手)" if self.my_color == Stone.BLACK else "白方 (后手)"
-        stats_text = (
-            f"【联机 - 第 {self.session_id + 1} 局】\n"
-            f"我方执：{color_str}\n"
-            f"战绩：{self.my_wins}胜 {self.peer_wins}负 {self.draws}平"
-        )
+        stats_text = f"【联机 - 第 {self.session_id + 1} 局】\n" f"我方执：{color_str}\n" f"战绩：{self.my_wins}胜 {self.peer_wins}负 {self.draws}平"
         self.stats_var.set(stats_text)
 
     def _update_stats(self, winner_color: int | None) -> None:
@@ -875,7 +890,7 @@ class GomokuApp:
             return
 
         # 防止一局内多次计分
-        if getattr(self, 'stats_updated_session', -1) == self.session_id:
+        if getattr(self, "stats_updated_session", -1) == self.session_id:
             return
         self.stats_updated_session = self.session_id
 
@@ -923,6 +938,7 @@ class GomokuApp:
                         winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
                     else:
                         self.root.bell()
+
                     # 抖动效果：快速左右位移
                     def shake(count: int = 5) -> None:
                         if count <= 0 or not self._network_dialog_open:
@@ -935,6 +951,7 @@ class GomokuApp:
                             self._network_dialog.after(50, lambda: shake(count - 1))
                         except tk.TclError:
                             pass
+
                     shake()
                     return
                 else:
@@ -1229,22 +1246,48 @@ class GomokuApp:
             self._show_start_dialog()
             return
 
-        if message.startswith("RESET|"):
-            now = time.monotonic()
-            if now - self.last_reset_at < self.reset_cooldown:
-                return
-            self.last_reset_at = now
+        if message.startswith("REMATCH_REQ|"):
             parts = message.split("|")
             if len(parts) >= 2:
                 try:
                     incoming_session = int(parts[1])
                 except ValueError:
                     incoming_session = self.session_id
+
+                # 忽略过期的请求
                 if incoming_session < self.session_id:
                     return
-                self.session_id = incoming_session
-            self._reset_game(show_dialog=False)
-            self._show_start_dialog()
+
+                # 如果我方也正好发了请求（同时互相邀请），直接当做双方都同意
+                if self.waiting_rematch_reply:
+                    self.waiting_rematch_reply = False
+                    self._send_net(f"REMATCH_ACK|{self.session_id}|ACCEPT")
+                    self._execute_rematch()
+                    return
+
+                # 弹窗询问我方是否同意
+                msg = "对方请求重新开始对局（或开启下一局），是否同意？\n若同意，当前对局（若未结束）将作废。"
+                agree = messagebox.askyesno("对局请求", msg)
+
+                if agree:
+                    self._send_net(f"REMATCH_ACK|{self.session_id}|ACCEPT")
+                    self._execute_rematch()
+                else:
+                    self._send_net(f"REMATCH_ACK|{self.session_id}|REJECT")
+                    self._set_status("已拒绝对方的重新对局请求。")
+            return
+
+        if message.startswith("REMATCH_ACK|"):
+            self.waiting_rematch_reply = False
+            parts = message.split("|")
+            if len(parts) >= 3:
+                reply = parts[2]
+                if reply == "ACCEPT":
+                    self._set_status("对方同意了请求，对局重置！")
+                    self._execute_rematch()
+                else:
+                    self._set_status("对方拒绝了重新对局的请求。")
+                    messagebox.showinfo("请求被拒", "对方拒绝了您的请求。")
             return
 
         if message.startswith("RESULT|"):
