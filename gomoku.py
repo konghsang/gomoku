@@ -496,6 +496,7 @@ class GomokuApp:
         self.peer_wins = 0
         self.draws = 0
         self.stats_updated_session = -1
+        self.game_result_info: dict | None = None
 
         self._build_ui()
         self._center_window()
@@ -607,6 +608,10 @@ class GomokuApp:
         self._redraw()
         self._set_status("黑方先手。黑方禁手：三三、四四、长连。")
         self._refresh_stats_ui()
+        # 重置远程对局的状态标志，确保后续重赛请求能被正确处理
+        self._rematch_done = False
+        self._rematch_acked = False
+        self.waiting_rematch_reply = False
         if show_dialog:
             self._show_start_dialog()
 
@@ -642,8 +647,13 @@ class GomokuApp:
         if getattr(self, "_rematch_done", False):
             return
         self._rematch_done = True
-        self.session_id += 1
+        # 先重置游戏，再自增 session_id，确保 REMATCH_ACK 校验时
+        # ack_session 与 self.session_id 匹配（对方发送 ACK 时的 session 还未自增）
         self._reset_game(show_dialog=False)
+        self.session_id += 1
+        # 远程模式下重新分配颜色（确保换边后状态一致）
+        if self.mode == "remote" and self.networked:
+            self._assign_remote_colors()
         self._show_start_dialog()
 
     def _apply_start(self) -> None:
@@ -856,12 +866,26 @@ class GomokuApp:
             self._redraw()  # 先绘制棋子
             self.canvas.update()  # 强制刷新画布，确保棋子可见
 
+            # 记录对局结果信息（用于保存）
+            winner_color = Stone.WHITE if color == Stone.BLACK else Stone.BLACK
+            winner_str = "black" if winner_color == Stone.BLACK else "white"
+            self.game_result_info = {
+                "result": "forbidden",
+                "winner_color": winner_str,
+                "forbidden_color": "black",
+                "forbidden_reason": result.message,
+                "final_message": final_message,
+                "mode": self.mode,
+                "my_role": "host" if self.is_host else "client" if self.mode == "remote" else None,
+                "my_color": "black" if self.my_color == Stone.BLACK else "white" if self.my_color == Stone.WHITE else None,
+                "is_host": self.is_host,
+            }
+
             # 1. 立即同步落子动作到远端
             if not is_remote:
                 self._send_move_if_needed(x, y, color)
 
             # 2. 更新战绩与换边状态
-            winner_color = Stone.WHITE if color == Stone.BLACK else Stone.BLACK
             self._update_stats(winner_color)
             self._handle_remote_game_end()
             self._update_cursor()
@@ -878,6 +902,18 @@ class GomokuApp:
         if result.win:
             self.game_over = True
             self._set_status(result.message)
+
+            # 记录对局结果信息（五连获胜）
+            winner_str = "black" if color == Stone.BLACK else "white"
+            self.game_result_info = {
+                "result": "five_in_a_row",
+                "winner_color": winner_str,
+                "final_message": result.message,
+                "mode": self.mode,
+                "my_role": "host" if self.is_host else "client" if self.mode == "remote" else None,
+                "my_color": "black" if self.my_color == Stone.BLACK else "white" if self.my_color == Stone.WHITE else None,
+                "is_host": self.is_host,
+            }
 
             # 1. 立即同步落子动作到远端
             if not is_remote:
@@ -900,6 +936,18 @@ class GomokuApp:
         if all(self.board[y][x] != Stone.EMPTY for y in range(BOARD_SIZE) for x in range(BOARD_SIZE)):
             self.game_over = True
             self._set_status("棋盘已满，平局。")
+
+            # 记录对局结果信息（平局）
+            self.game_result_info = {
+                "result": "draw",
+                "winner_color": None,
+                "final_message": "棋盘已满，平局！",
+                "mode": self.mode,
+                "my_role": "host" if self.is_host else "client" if self.mode == "remote" else None,
+                "my_color": "black" if self.my_color == Stone.BLACK else "white" if self.my_color == Stone.WHITE else None,
+                "is_host": self.is_host,
+            }
+
             self._update_stats(None)
             self._handle_remote_game_end()
             self._update_cursor()
@@ -1193,26 +1241,28 @@ class GomokuApp:
                 self.net_queue.put(("DISCONNECTED", "连接已断开。"))
                 return
 
+            sock.settimeout(5.0)
             buffer: str = ""
-            while True:
+            while self.networked:
                 try:
-                    data = sock.recv(1024)
+                    data = sock.recv(4096)
+                except socket.timeout:
+                    continue
                 except OSError:
                     self.net_queue.put(("DISCONNECTED", "连接已断开。"))
                     break
+
                 if not data:
                     self.net_queue.put(("DISCONNECTED", "连接已断开。"))
                     break
-                try:
-                    buffer += data.decode("utf-8")
-                except UnicodeDecodeError:
-                    # 忽略无法解码的字节序列
-                    continue
+
+                buffer += data.decode("utf-8", errors="ignore")
+
                 # 防止 TCP 粘包导致 buffer 无限增长（OOM 防护）
                 if len(buffer) > 10240:
-                    buffer = ""
                     self.net_queue.put(("DISCONNECTED", "接收数据异常，连接已断开。"))
                     break
+
                 with self._last_message_time_lock:
                     self._last_message_time = time.monotonic()
                 while "\n" in buffer:
@@ -1229,7 +1279,8 @@ class GomokuApp:
         try:
             sock.sendall((message + "\n").encode("utf-8"))
         except OSError:
-            self._set_status("发送失败，连接已断开。")
+            if self.networked:
+                self.net_queue.put(("DISCONNECTED", "发送失败，连接已断开。"))
 
     def _process_network_queue(self) -> None:
         if getattr(self, "_dialog_open", False):
@@ -1292,6 +1343,7 @@ class GomokuApp:
                 if peer_session > self.session_id:
                     self.session_id = peer_session
                     self._reset_game(show_dialog=False)
+                    self.root.after(0, lambda: messagebox.showinfo("状态同步", "检测到对局状态不一致，棋盘已自动同步。"))
                 elif peer_session == self.session_id and self.networked:
                     # session相同但棋盘可能不同步时，发送当前棋盘状态给远端校验
                     pass
@@ -1382,9 +1434,8 @@ class GomokuApp:
 
         if message.startswith("MOVE|"):
             parts = message.split("|")
-            # 新格式: MOVE|session_id|x|y|color
-            # 兼容旧格式: MOVE|session_id|x|y
-            if len(parts) in (4, 5):
+
+            if len(parts) == 4 or len(parts) == 5:
                 try:
                     incoming_session = int(parts[1])
                     x = int(parts[2])
@@ -1393,10 +1444,16 @@ class GomokuApp:
                     return
                 if incoming_session != self.session_id:
                     return
-                # 必须要有颜色信息，否则丢弃（拒绝旧格式）
-                if len(parts) != 5 or parts[4] not in ("BLACK", "WHITE"):
-                    return
-                color = Stone.BLACK if parts[4] == "BLACK" else Stone.WHITE
+
+                # Check color if present
+                if len(parts) == 5:
+                    if parts[4] not in ("BLACK", "WHITE"):
+                        return
+                    color = Stone.BLACK if parts[4] == "BLACK" else Stone.WHITE
+                else:
+                    # Infer color if missing
+                    color = self.peer_color
+
                 if inside(x, y) and self.board[y][x] == Stone.EMPTY:
                     self._apply_move(x, y, color, is_remote=True)
 
@@ -1443,10 +1500,24 @@ class GomokuApp:
         if not file_path:
             return
 
-        data = {
+        data: dict[str, object] = {
             "start_time": self.game_start_time.isoformat(timespec="seconds"),
             "records": self.move_records,
         }
+
+        # 加入对局结果信息（如果有）
+        if self.game_result_info:
+            data["result_info"] = self.game_result_info
+
+        # 联机模式下额外保存战绩统计
+        if self.mode == "remote" and self.networked:
+            data["stats"] = {
+                "my_wins": self.my_wins,
+                "peer_wins": self.peer_wins,
+                "draws": self.draws,
+                "my_color": "black" if self.my_color == Stone.BLACK else "white",
+            }
+
         try:
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
