@@ -20,6 +20,7 @@ import struct
 import sys
 import threading
 import time
+import traceback
 import tkinter as tk
 import wave
 from datetime import datetime
@@ -628,6 +629,7 @@ class GomokuApp:
             if now - self.last_reset_at < self.reset_cooldown:
                 return
             self.last_reset_at = now
+            self.game_over = True
             self._send_rematch_request()
             return
 
@@ -850,6 +852,8 @@ class GomokuApp:
         self._draw_stones()
 
     def _apply_move(self, x: int, y: int, color: int, is_remote: bool = False) -> bool:
+        if self.game_over:
+            return False
         self.board[y][x] = color
         if color == Stone.BLACK:
             result = check_black_move(self.board, x, y)
@@ -1274,43 +1278,55 @@ class GomokuApp:
     def _send_net(self, message: str) -> None:
         with self._net_lock:
             sock = self.net_socket
-        if sock is None:
-            return
-        try:
-            sock.sendall((message + "\n").encode("utf-8"))
-        except OSError:
-            if self.networked:
-                self.net_queue.put(("DISCONNECTED", "发送失败，连接已断开。"))
+            if sock is None:
+                return
+            try:
+                sock.sendall((message + "\n").encode("utf-8"))
+            except OSError:
+                if self.networked:
+                    self.net_queue.put(("DISCONNECTED", "发送失败，连接已断开。"))
 
     def _process_network_queue(self) -> None:
         if getattr(self, "_dialog_open", False):
             self.root.after(100, self._process_network_queue)
             return
 
-        while True:
-            try:
-                kind, payload = self.net_queue.get_nowait()
-            except queue.Empty:
-                break
+        try:
+            while True:
+                try:
+                    kind, payload = self.net_queue.get_nowait()
+                except queue.Empty:
+                    break
 
-            if kind == "STATUS":
-                self._set_status(str(payload))
-            elif kind == "CONNECTED":
-                self.networked = True
-                self._assign_remote_colors()
-            elif kind == "DISCONNECTED":
-                was_playing = not self.game_over and self.mode == "remote"
-                self._disconnect_network()
-                self._set_status(str(payload))
-                # 游戏进行中断线时弹窗提示（不阻塞事件循环）
-                if was_playing:
-                    self.root.after(0, lambda: messagebox.showwarning("连接断开", str(payload)))
-            elif kind == "NET":
-                self._handle_net_message(str(payload))
+                try:
+                    if kind == "STATUS":
+                        self._set_status(str(payload))
+                    elif kind == "CONNECTED":
+                        self.networked = True
+                        self._assign_remote_colors()
+                    elif kind == "DISCONNECTED":
+                        was_playing = not self.game_over and self.mode == "remote"
+                        self._disconnect_network()
+                        self._set_status(str(payload))
+                        # 游戏进行中断线时弹窗提示（不阻塞事件循环）
+                        if was_playing:
+                            self.root.after(0, lambda: messagebox.showwarning("连接断开", str(payload)))
+                    elif kind == "NET":
+                        self._handle_net_message(str(payload))
+                except Exception as e:
+                    self._set_status(f"处理网络消息异常：{e}")
+        except Exception:
+            traceback.print_exc()
 
         self.root.after(100, self._process_network_queue)
 
     def _handle_net_message(self, message: str) -> None:
+        try:
+            self._do_handle_net_message(message)
+        except Exception as e:
+            self._set_status(f"处理网络消息异常：{e}")
+
+    def _do_handle_net_message(self, message: str) -> None:
         # 心跳消息
         if message == "PING":
             self._send_net("PONG")
@@ -1418,9 +1434,10 @@ class GomokuApp:
                     self.root.after(0, lambda: messagebox.showinfo("请求被拒", "对方拒绝了您的请求。"))
             return
         if message.startswith("NEXTBLACK|"):
+            if self.waiting_rematch_reply:
+                return
             parts = message.split("|")
             if len(parts) == 3:
-                # 验证 session_id
                 try:
                     nb_session = int(parts[1])
                 except ValueError:
